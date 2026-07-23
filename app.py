@@ -17,8 +17,8 @@ st.set_page_config(
 SHEET_ID = "1J_x0us47fxOccFeFbVxl6jT3h7M0v31r246bmyLQjl8"
 
 CORTES_MINUTOS = [
-    ("07:00 hrs", 0,      7*60),
-    ("11:00 hrs", 7*60+1, 11*60),
+    ("07:00 hrs", 0,       7*60),
+    ("11:00 hrs", 7*60+1,  11*60),
     ("13:00 hrs", 11*60+1, 13*60),
     ("16:00 hrs", 13*60+1, 16*60),
     ("19:00 hrs", 16*60+1, 19*60),
@@ -49,14 +49,28 @@ def load_sheet(tab_name):
     return df
 
 def load_all():
-    meli_hoy  = load_sheet("Ventas MX")
-    meli_man  = load_sheet("Ventas MX MAÑANA")
-    amazon    = load_sheet("AMAZON")
-    easyship  = load_sheet("EASY SHIP")
-    flex      = load_sheet("AMAZON FLEX")
+    meli_hoy = load_sheet("Ventas MX")
+    meli_man = load_sheet("Ventas MX MAÑANA")
+    amazon   = load_sheet("AMAZON")
+    easyship = load_sheet("EASY SHIP")
+    flex     = load_sheet("AMAZON FLEX")
     return meli_hoy, meli_man, amazon, easyship, flex
 
 # ── HELPERS ───────────────────────────────────────────────
+def getcol(cols_dict, key):
+    for c, orig in cols_dict.items():
+        if key.lower() in c:
+            return orig
+    return None
+
+def safe_int(val):
+    """Extrae el primer número entero de cualquier valor."""
+    try:
+        m = re.search(r'\d+', str(val).split('\n')[0])
+        return int(m.group()) if m else 1
+    except:
+        return 1
+
 def parse_time_desc(desc):
     m = re.search(r'a las (\d{1,2}):(\d{2})', str(desc), re.IGNORECASE)
     if m:
@@ -109,12 +123,6 @@ def corte_status(corte_label):
     except:
         return "proximo"
 
-def getcol(cols_dict, key):
-    for c, orig in cols_dict.items():
-        if key.lower() in c:
-            return orig
-    return None
-
 # ── PROCESAMIENTO MELI ────────────────────────────────────
 def process_meli(df, tab):
     orders = []
@@ -161,11 +169,11 @@ def process_meli(df, tab):
                     "id":     child_id,
                     "sku":    str(child.get(col_sku,    "")).strip() if col_sku    else "",
                     "titulo": str(child.get(col_titulo, "")).strip() if col_titulo else "",
-                    "uds":    str(child.get(col_uds,    "1")).strip() if col_uds   else "1",
+                    "uds":    safe_int(child.get(col_uds, "1")) if col_uds else 1,
                     "estado": child_estado,
                 })
                 i += 1
-            total_uds = sum(int(p["uds"] or 1) for p in partidas)
+            total_uds = sum(p["uds"] for p in partidas)
             time_mins = parse_time_desc(desc)
             orders.append({
                 "tab": tab, "canal": "MeLi", "paqueteria": "MeLi",
@@ -176,10 +184,7 @@ def process_meli(df, tab):
             })
         else:
             time_mins = parse_time_desc(desc)
-            try:
-                uds_int = int(uds)
-            except:
-                uds_int = 1
+            uds_int   = safe_int(uds)
             orders.append({
                 "tab": tab, "canal": "MeLi", "paqueteria": "MeLi",
                 "id": order_id, "fecha": fecha, "estado": estado,
@@ -199,8 +204,8 @@ def process_amazon(df_amazon, df_easyship):
     easy_map = {}
     if not df_easyship.empty:
         cols_es = {c.lower(): c for c in df_easyship.columns}
-        c_esid = getcol(cols_es, "order-id") or getcol(cols_es, "order id")
-        c_slot = getcol(cols_es, "pickup-slot") or getcol(cols_es, "pickup slot")
+        c_esid  = getcol(cols_es, "order-id") or getcol(cols_es, "order id")
+        c_slot  = getcol(cols_es, "pickup-slot") or getcol(cols_es, "pickup slot")
         if c_esid:
             for _, row in df_easyship.iterrows():
                 oid = str(row.get(c_esid, "")).strip()
@@ -223,12 +228,8 @@ def process_amazon(df_amazon, df_easyship):
         paqueteria = "Amazon Logistics" if es_easy else "DHL"
         slot       = easy_map.get(order_id, "")
         time_mins  = parse_pickup_slot(slot) if es_easy else None
-        corte      = assign_corte(time_mins)
 
-        try:
-            uds = int(str(row.get(c_uds, "1")).strip())
-        except:
-            uds = 1
+        uds = safe_int(row.get(c_uds, "1"))
 
         orders.append({
             "tab": "hoy", "canal": "Amazon", "paqueteria": paqueteria,
@@ -237,7 +238,7 @@ def process_amazon(df_amazon, df_easyship):
             "estado": "Easy Ship" if es_easy else "Pendiente",
             "sku":    str(row.get(c_sku,  "")).strip() if c_sku  else "",
             "titulo": str(row.get(c_prod, "")).strip() if c_prod else "",
-            "uds": uds, "corte": corte,
+            "uds": uds, "corte": assign_corte(time_mins),
             "es_paquete": False, "partidas": [],
         })
     return orders
@@ -248,27 +249,23 @@ def process_flex(df):
     if df.empty:
         return orders
 
-    cols = {c.lower(): c for c in df.columns}
-    c_id   = getcol(cols, "pedido del cliente") or getcol(cols, "mero de pedido")
-    c_sku  = getcol(cols, "sku")
-    c_tit  = getcol(cols, "tulo") or getcol(cols, "titulo")
-    c_uds  = getcol(cols, "unidades") or getcol(cols, "cantidad")
-    c_est  = getcol(cols, "estado")
-    c_fenv = getcol(cols, "prevista") or getcol(cols, "fecha")
+    cols  = {c.lower(): c for c in df.columns}
+    c_id  = getcol(cols, "pedido del cliente") or getcol(cols, "mero de pedido")
+    c_sku = getcol(cols, "sku")
+    c_tit = getcol(cols, "tulo") or getcol(cols, "titulo")
+    c_uds = getcol(cols, "unidades") or getcol(cols, "cantidad")
+    c_est = getcol(cols, "estado")
+    c_fenv= getcol(cols, "prevista") or getcol(cols, "fecha")
 
     for _, row in df.iterrows():
-        order_id = str(row.get(c_id, "")).strip() if c_id else ""
+        order_id = str(row.get(c_id,  "")).strip() if c_id  else ""
         sku      = str(row.get(c_sku, "")).strip() if c_sku else ""
         if not order_id and not sku:
             continue
 
         fecha     = str(row.get(c_fenv, "")).strip() if c_fenv else ""
         time_mins = parse_flex_time(fecha)
-
-        try:
-            uds = int(str(row.get(c_uds, "1")).strip())
-        except:
-            uds = 1
+        uds       = safe_int(row.get(c_uds, "1"))
 
         orders.append({
             "tab": "hoy", "canal": "FLEX", "paqueteria": "FLEX",
@@ -319,10 +316,10 @@ if not load_ok:
 # Aplicar filtros
 current_tab = "hoy" if "Hoy" in tab_sel else "manana"
 filtered = [o for o in all_orders if o["tab"] == current_tab]
-if filtro_canal != "Todos":    filtered = [o for o in filtered if o["canal"]      == filtro_canal]
-if filtro_paq   != "Todas":    filtered = [o for o in filtered if o["paqueteria"] == filtro_paq]
-if filtro_est   == "Activos":  filtered = [o for o in filtered if not is_cancelado(o["estado"])]
-if filtro_est   == "Cancelados": filtered = [o for o in filtered if is_cancelado(o["estado"])]
+if filtro_canal != "Todos":     filtered = [o for o in filtered if o["canal"]      == filtro_canal]
+if filtro_paq   != "Todas":     filtered = [o for o in filtered if o["paqueteria"] == filtro_paq]
+if filtro_est   == "Activos":   filtered = [o for o in filtered if not is_cancelado(o["estado"])]
+if filtro_est   == "Cancelados":filtered = [o for o in filtered if is_cancelado(o["estado"])]
 
 # KPIs
 activos    = [o for o in filtered if not is_cancelado(o["estado"])]
