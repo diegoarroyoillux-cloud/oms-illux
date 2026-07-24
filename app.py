@@ -16,112 +16,99 @@ st.set_page_config(
 
 SHEET_ID = "1J_x0us47fxOccFeFbVxl6jT3h7M0v31r246bmyLQjl8"
 
-CORTES_MINUTOS = [
-    ("07:00 hrs", 0,       7*60),
-    ("11:00 hrs", 7*60+1,  11*60),
-    ("13:00 hrs", 11*60+1, 13*60),
-    ("16:00 hrs", 13*60+1, 16*60),
-    ("19:00 hrs", 16*60+1, 19*60),
-    ("Sin corte",  19*60+1, 99999),
+CORTES = [
+    {"label": "07:00 hrs", "mins": 7 * 60},
+    {"label": "11:00 hrs", "mins": 11 * 60},
+    {"label": "13:00 hrs", "mins": 13 * 60},
+    {"label": "16:00 hrs", "mins": 16 * 60},
+    {"label": "19:00 hrs", "mins": 19 * 60},
 ]
 
 # ── AUTENTICACIÓN ─────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
-def get_gspread_client():
+def get_client():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets.readonly",
-        "https://www.googleapis.com/auth/drive.readonly"
+        "https://www.googleapis.com/auth/drive.readonly",
     ]
     creds_dict = json.loads(st.secrets["GOOGLE_CREDENTIALS"])
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     return gspread.authorize(creds)
 
-# ── CARGA DE DATOS ────────────────────────────────────────
-@st.cache_data(ttl=300, show_spinner="Actualizando datos...")
-def load_sheet(tab_name):
-    client = get_gspread_client()
-    sh = client.open_by_key(SHEET_ID)
-    ws = sh.worksheet(tab_name)
+@st.cache_data(ttl=300, show_spinner=False)
+def load_sheet(tab):
+    client = get_client()
+    ws = client.open_by_key(SHEET_ID).worksheet(tab)
     data = ws.get_all_values()
     if len(data) < 2:
         return pd.DataFrame()
-    df = pd.DataFrame(data[1:], columns=data[0])
-    return df
+    return pd.DataFrame(data[1:], columns=data[0])
 
+@st.cache_data(ttl=300, show_spinner="Actualizando datos...")
 def load_all():
-    meli_hoy = load_sheet("Ventas MX")
-    meli_man = load_sheet("Ventas MX MAÑANA")
-    amazon   = load_sheet("AMAZON")
-    easyship = load_sheet("EASY SHIP")
-    flex     = load_sheet("AMAZON FLEX")
-    return meli_hoy, meli_man, amazon, easyship, flex
+    return {
+        "meli_hoy": load_sheet("Ventas MX"),
+        "meli_man": load_sheet("Ventas MX MAÑANA"),
+        "amazon":   load_sheet("AMAZON"),
+        "easyship": load_sheet("EASY SHIP"),
+        "flex":     load_sheet("AMAZON FLEX"),
+    }
 
 # ── HELPERS ───────────────────────────────────────────────
-def getcol(cols_dict, key):
-    for c, orig in cols_dict.items():
-        if key.lower() in c:
-            return orig
-    return None
-
 def safe_int(val):
-    """Extrae el primer número entero de cualquier valor."""
     try:
         m = re.search(r'\d+', str(val).split('\n')[0])
         return int(m.group()) if m else 1
     except:
         return 1
 
-def parse_time_desc(desc):
-    m = re.search(r'a las (\d{1,2}):(\d{2})', str(desc), re.IGNORECASE)
+def find_col(cols, *keywords):
+    for kw in keywords:
+        for c in cols:
+            if kw.lower() in c.lower():
+                return c
+    return None
+
+def extract_time_mins(text):
+    t = str(text)
+    # "colecta de las HH:MM"
+    m = re.search(r'colecta de las (\d{1,2}):(\d{2})', t, re.I)
     if m:
         return int(m.group(1)) * 60 + int(m.group(2))
-    m2 = re.search(r'las (\d{1,2}):(\d{2})', str(desc), re.IGNORECASE)
-    if m2:
-        return int(m2.group(1)) * 60 + int(m2.group(2))
-    return None
-
-def parse_pickup_slot(slot):
-    m = re.search(r'(\d{1,2}):(\d{2})\s*(AM|PM)', str(slot), re.IGNORECASE)
+    # "a las HH:MM"
+    m = re.search(r'a las (\d{1,2}):(\d{2})', t, re.I)
     if m:
-        h, mn, period = int(m.group(1)), int(m.group(2)), m.group(3).upper()
-        if period == 'PM' and h != 12: h += 12
-        if period == 'AM' and h == 12: h = 0
+        return int(m.group(1)) * 60 + int(m.group(2))
+    # "HH:MM AM/PM" (Easy Ship slots)
+    m = re.search(r'(\d{1,2}):(\d{2})\s*(AM|PM)', t, re.I)
+    if m:
+        h, mn, p = int(m.group(1)), int(m.group(2)), m.group(3).upper()
+        if p == 'PM' and h != 12: h += 12
+        if p == 'AM' and h == 12: h = 0
         return h * 60 + mn
-    return None
-
-def parse_flex_time(dt_str):
-    m = re.search(r'(\d{1,2}):(\d{2})$', str(dt_str).strip())
+    # trailing HH:MM — FLEX dates like "2026-07-22 14:00"
+    m = re.search(r'(\d{1,2}):(\d{2})\s*$', t.strip())
     if m:
         return int(m.group(1)) * 60 + int(m.group(2))
     return None
 
 def assign_corte(mins):
     if mins is None:
-        return "Sin corte"
-    for label, lo, hi in CORTES_MINUTOS:
-        if mins <= hi:
-            return label
-    return "Sin corte"
+        return "Sin asignar"
+    for c in CORTES:
+        if mins <= c["mins"]:
+            return c["label"]
+    return "Sin asignar"
 
-def is_cancelado(estado):
-    return "cancel" in str(estado).lower()
-
-def corte_status(corte_label):
-    now = datetime.now()
-    now_mins = now.hour * 60 + now.minute
-    if corte_label in ("Sin corte", "Mañana"):
-        return "proximo"
-    try:
-        h = int(corte_label.split(":")[0])
-        corte_mins = h * 60
-        if now_mins > corte_mins:
-            return "cerrado"
-        elif now_mins >= corte_mins - 60:
-            return "proceso"
-        else:
-            return "proximo"
-    except:
-        return "proximo"
+def classify_estado(estado, preparado_col=None):
+    e = str(estado).lower()
+    if any(k in e for k in ["cancel", "no despach"]):
+        return "cancelado"
+    if preparado_col and str(preparado_col).lower() in ["sí", "si", "yes", "true", "1"]:
+        return "preparado"
+    if any(k in e for k in ["preparado", "listo", "en camino", "entregado", "enviado", "easy ship"]):
+        return "preparado"
+    return "pendiente"
 
 # ── PROCESAMIENTO MELI ────────────────────────────────────
 def process_meli(df, tab):
@@ -129,68 +116,68 @@ def process_meli(df, tab):
     if df.empty:
         return orders
 
-    cols = {c.lower(): c for c in df.columns}
-
-    col_id     = getcol(cols, "venta") or getcol(cols, "pedido")
-    col_estado = getcol(cols, "estado")
-    col_desc   = getcol(cols, "descripci")
-    col_sku    = getcol(cols, "sku")
-    col_titulo = getcol(cols, "tulo") or getcol(cols, "titulo")
-    col_uds    = getcol(cols, "unidades") or getcol(cols, "cantidad")
-    col_fecha  = getcol(cols, "fecha")
+    cols = list(df.columns)
+    c_id     = find_col(cols, "# de venta", "venta")
+    c_fecha  = find_col(cols, "Fecha de venta", "fecha")
+    c_estado = find_col(cols, "Estado")
+    c_desc   = find_col(cols, "Descripción del estado", "descripci")
+    c_paquete= find_col(cols, "Paquete de varios")
+    c_sku    = find_col(cols, "SKU")
+    c_titulo = find_col(cols, "Título de la publicación", "título", "titulo")
+    c_uds    = find_col(cols, "Unidades")
 
     i = 0
     while i < len(df):
         row = df.iloc[i]
-        order_id = str(row.get(col_id, "")).strip() if col_id else ""
+        order_id = str(row.get(c_id, "")).strip() if c_id else ""
         if not order_id:
             i += 1
             continue
 
-        estado = str(row.get(col_estado, "")).strip() if col_estado else ""
-        desc   = str(row.get(col_desc,   "")).strip() if col_desc   else ""
-        sku    = str(row.get(col_sku,    "")).strip() if col_sku    else ""
-        titulo = str(row.get(col_titulo, "")).strip() if col_titulo else ""
-        uds    = str(row.get(col_uds,    "1")).strip() if col_uds   else "1"
-        fecha  = str(row.get(col_fecha,  "")).strip() if col_fecha  else ""
+        estado  = str(row.get(c_estado,  "")).strip() if c_estado  else ""
+        desc    = str(row.get(c_desc,    "")).strip() if c_desc    else ""
+        es_paq  = str(row.get(c_paquete, "")).strip().lower() if c_paquete else "no"
+        sku     = str(row.get(c_sku,     "")).strip() if c_sku     else ""
+        titulo  = str(row.get(c_titulo,  "")).strip() if c_titulo  else ""
+        fecha   = str(row.get(c_fecha,   "")).strip() if c_fecha   else ""
+        uds     = safe_int(row.get(c_uds, "1")) if c_uds else 1
 
-        es_paquete = "paquete de" in estado.lower()
+        clasificacion = classify_estado(estado)
+        time_mins     = extract_time_mins(desc)
+        corte         = assign_corte(time_mins)
 
-        if es_paquete:
+        if es_paq in ["sí", "si", "yes"]:
+            # Cabecera de paquete — recolectar partidas hijas
             partidas = []
             i += 1
             while i < len(df):
-                child        = df.iloc[i]
-                child_id     = str(child.get(col_id,     "")).strip() if col_id     else ""
-                child_estado = str(child.get(col_estado, "")).strip() if col_estado else ""
-                if not child_id or "paquete de" in child_estado.lower():
+                child     = df.iloc[i]
+                child_id  = str(child.get(c_id,     "")).strip() if c_id     else ""
+                child_paq = str(child.get(c_paquete,"")).strip().lower() if c_paquete else "no"
+                if not child_id or child_paq in ["sí", "si", "yes"]:
                     break
                 partidas.append({
                     "id":     child_id,
-                    "sku":    str(child.get(col_sku,    "")).strip() if col_sku    else "",
-                    "titulo": str(child.get(col_titulo, "")).strip() if col_titulo else "",
-                    "uds":    safe_int(child.get(col_uds, "1")) if col_uds else 1,
-                    "estado": child_estado,
+                    "sku":    str(child.get(c_sku,    "")).strip() if c_sku    else "",
+                    "titulo": str(child.get(c_titulo, "")).strip() if c_titulo else "",
+                    "uds":    safe_int(child.get(c_uds, "1")) if c_uds else 1,
+                    "estado": str(child.get(c_estado, "")).strip() if c_estado else "",
                 })
                 i += 1
-            total_uds = sum(p["uds"] for p in partidas)
-            time_mins = parse_time_desc(desc)
+            total_uds = sum(p["uds"] for p in partidas) or uds
             orders.append({
                 "tab": tab, "canal": "MeLi", "paqueteria": "MeLi",
-                "id": order_id, "fecha": fecha, "estado": estado,
+                "id": order_id, "fecha": fecha, "estado": estado, "desc": desc,
                 "sku": "—", "titulo": f"📦 PAQUETE ({len(partidas)} SKUs)",
-                "uds": total_uds, "corte": assign_corte(time_mins),
+                "uds": total_uds, "corte": corte, "clasificacion": clasificacion,
                 "es_paquete": True, "partidas": partidas,
             })
         else:
-            time_mins = parse_time_desc(desc)
-            uds_int   = safe_int(uds)
             orders.append({
                 "tab": tab, "canal": "MeLi", "paqueteria": "MeLi",
-                "id": order_id, "fecha": fecha, "estado": estado,
-                "sku": sku, "titulo": titulo, "uds": uds_int,
-                "corte": assign_corte(time_mins),
-                "es_paquete": False, "partidas": [],
+                "id": order_id, "fecha": fecha, "estado": estado, "desc": desc,
+                "sku": sku, "titulo": titulo, "uds": uds, "corte": corte,
+                "clasificacion": clasificacion, "es_paquete": False, "partidas": [],
             })
             i += 1
     return orders
@@ -203,42 +190,33 @@ def process_amazon(df_amazon, df_easyship):
 
     easy_map = {}
     if not df_easyship.empty:
-        cols_es = {c.lower(): c for c in df_easyship.columns}
-        c_esid  = getcol(cols_es, "order-id") or getcol(cols_es, "order id")
-        c_slot  = getcol(cols_es, "pickup-slot") or getcol(cols_es, "pickup slot")
-        if c_esid:
-            for _, row in df_easyship.iterrows():
-                oid = str(row.get(c_esid, "")).strip()
-                if oid:
-                    easy_map[oid] = str(row.get(c_slot, "")).strip() if c_slot else ""
-
-    cols_a = {c.lower(): c for c in df_amazon.columns}
-    c_id   = getcol(cols_a, "order-id") or getcol(cols_a, "order id")
-    c_sku  = getcol(cols_a, "sku")
-    c_prod = getcol(cols_a, "product-name") or getcol(cols_a, "product name")
-    c_uds  = getcol(cols_a, "quantity-purchased") or getcol(cols_a, "quantity")
-    c_fenv = getcol(cols_a, "fecha env") or getcol(cols_a, "latest-ship-date")
+        for _, row in df_easyship.iterrows():
+            oid  = str(row.get("order-id",    "")).strip()
+            slot = str(row.get("pickup-slot", "")).strip()
+            if oid:
+                easy_map[oid] = slot
 
     for _, row in df_amazon.iterrows():
-        if not c_id: continue
-        order_id = str(row.get(c_id, "")).strip()
-        if not order_id: continue
+        order_id = str(row.get("order-id", "")).strip()
+        if not order_id:
+            continue
 
         es_easy    = order_id in easy_map
         paqueteria = "Amazon Logistics" if es_easy else "DHL"
         slot       = easy_map.get(order_id, "")
-        time_mins  = parse_pickup_slot(slot) if es_easy else None
-
-        uds = safe_int(row.get(c_uds, "1"))
+        time_mins  = extract_time_mins(slot) if es_easy else None
+        corte      = assign_corte(time_mins)
+        estado     = "Easy Ship" if es_easy else "Pendiente"
 
         orders.append({
             "tab": "hoy", "canal": "Amazon", "paqueteria": paqueteria,
             "id": order_id,
-            "fecha": str(row.get(c_fenv, "")).strip() if c_fenv else "",
-            "estado": "Easy Ship" if es_easy else "Pendiente",
-            "sku":    str(row.get(c_sku,  "")).strip() if c_sku  else "",
-            "titulo": str(row.get(c_prod, "")).strip() if c_prod else "",
-            "uds": uds, "corte": assign_corte(time_mins),
+            "fecha": str(row.get("Fecha envío", "")).strip(),
+            "estado": estado, "desc": slot,
+            "sku":    str(row.get("sku",          "")).strip(),
+            "titulo": str(row.get("product-name", "")).strip(),
+            "uds": safe_int(row.get("quantity-purchased", "1")),
+            "corte": corte, "clasificacion": classify_estado(estado),
             "es_paquete": False, "partidas": [],
         })
     return orders
@@ -249,13 +227,14 @@ def process_flex(df):
     if df.empty:
         return orders
 
-    cols  = {c.lower(): c for c in df.columns}
-    c_id  = getcol(cols, "pedido del cliente") or getcol(cols, "mero de pedido")
-    c_sku = getcol(cols, "sku")
-    c_tit = getcol(cols, "tulo") or getcol(cols, "titulo")
-    c_uds = getcol(cols, "unidades") or getcol(cols, "cantidad")
-    c_est = getcol(cols, "estado")
-    c_fenv= getcol(cols, "prevista") or getcol(cols, "fecha")
+    cols = list(df.columns)
+    c_id   = find_col(cols, "pedido del cliente", "número de pedido")
+    c_sku  = find_col(cols, "SKU")
+    c_tit  = find_col(cols, "título", "titulo")
+    c_uds  = find_col(cols, "Unidades")
+    c_est  = find_col(cols, "Estado")
+    c_fenv = find_col(cols, "prevista", "fecha")
+    c_prep = find_col(cols, "Preparado")
 
     for _, row in df.iterrows():
         order_id = str(row.get(c_id,  "")).strip() if c_id  else ""
@@ -264,149 +243,217 @@ def process_flex(df):
             continue
 
         fecha     = str(row.get(c_fenv, "")).strip() if c_fenv else ""
-        time_mins = parse_flex_time(fecha)
-        uds       = safe_int(row.get(c_uds, "1"))
+        estado    = str(row.get(c_est,  "")).strip() if c_est  else ""
+        preparado = str(row.get(c_prep, "")).strip() if c_prep else ""
+        time_mins = extract_time_mins(fecha)
 
         orders.append({
             "tab": "hoy", "canal": "FLEX", "paqueteria": "FLEX",
-            "id": order_id, "fecha": fecha,
-            "estado": str(row.get(c_est, "")).strip() if c_est else "",
+            "id": order_id, "fecha": fecha, "estado": estado, "desc": fecha,
             "sku": sku,
             "titulo": str(row.get(c_tit, "")).strip() if c_tit else "",
-            "uds": uds, "corte": assign_corte(time_mins),
+            "uds": safe_int(row.get(c_uds, "1")) if c_uds else 1,
+            "corte": assign_corte(time_mins),
+            "clasificacion": classify_estado(estado, preparado_col=preparado),
             "es_paquete": False, "partidas": [],
         })
     return orders
 
-# ── UI ────────────────────────────────────────────────────
-st.markdown("## 📦 OMS — Gestión de Pedidos ILLUX Tlanepantla")
+# ── CANAL CONFIG ──────────────────────────────────────────
+CANAL_CONFIG = {
+    "MeLi":             {"emoji": "🟡", "label": "Mercado Libre"},
+    "Amazon_DHL":       {"emoji": "🔴", "label": "Amazon DHL"},
+    "Amazon_Logistics": {"emoji": "🔵", "label": "Amazon Logistics"},
+    "FLEX":             {"emoji": "🟣", "label": "Amazon FLEX"},
+}
 
-col_refresh, col_tab, col_f1, col_f2, col_f3 = st.columns([1, 2, 2, 2, 2])
-with col_refresh:
+def get_canal_key(o):
+    if o["canal"] == "Amazon":
+        return "Amazon_DHL" if o["paqueteria"] == "DHL" else "Amazon_Logistics"
+    return o["canal"]
+
+def corte_status(corte_label):
+    now_mins = datetime.now().hour * 60 + datetime.now().minute
+    try:
+        h = int(corte_label.split(":")[0])
+        cm = h * 60
+        if now_mins > cm + 30:
+            return "cerrado", "✔️ Cerrado"
+        elif now_mins >= cm - 60:
+            return "proceso", "⏳ En proceso"
+        else:
+            return "proximo", "🔜 Próximo"
+    except:
+        return "proximo", ""
+
+CLAS_EMOJI = {"preparado": "✅", "pendiente": "⏳", "cancelado": "🚫"}
+
+# ── HEADER ────────────────────────────────────────────────
+st.markdown("## 📦 OMS — Control de Pedidos | ILLUX Tlanepantla")
+st.caption(f"🏭 Almacén: Tlanepantla · {datetime.now().strftime('%A %d/%m/%Y  %H:%M hrs')}")
+
+col_ref, col_vista, col_canal = st.columns([1, 3, 4])
+with col_ref:
     if st.button("↺ Actualizar", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
-with col_tab:
-    tab_sel = st.radio("Vista", ["📅 Hoy", "📆 Mañana"], horizontal=True, label_visibility="collapsed")
-with col_f1:
-    filtro_canal = st.selectbox("Canal", ["Todos", "MeLi", "Amazon", "FLEX"], label_visibility="collapsed")
-with col_f2:
-    filtro_paq = st.selectbox("Paquetería", ["Todas", "DHL", "Amazon Logistics", "FLEX", "MeLi"], label_visibility="collapsed")
-with col_f3:
-    filtro_est = st.selectbox("Estado", ["Todos", "Activos", "Cancelados"], label_visibility="collapsed")
+with col_vista:
+    vista = st.radio("Vista", ["📅 Hoy", "📆 Mañana"], horizontal=True, label_visibility="collapsed")
+with col_canal:
+    filtro_canal = st.multiselect(
+        "Canal", ["MeLi", "Amazon", "FLEX"],
+        default=["MeLi", "Amazon", "FLEX"],
+        label_visibility="collapsed"
+    )
 
-# Carga de datos
-with st.spinner("Cargando datos..."):
-    try:
-        meli_hoy_df, meli_man_df, amazon_df, easyship_df, flex_df = load_all()
-        all_orders = (
-            process_meli(meli_hoy_df, "hoy") +
-            process_meli(meli_man_df, "manana") +
-            process_amazon(amazon_df, easyship_df) +
-            process_flex(flex_df)
-        )
-        load_ok = True
-    except Exception as e:
-        st.error(f"❌ Error al cargar datos: {e}")
-        load_ok = False
-
-if not load_ok:
+# ── CARGA DE DATOS ────────────────────────────────────────
+try:
+    with st.spinner("Cargando datos..."):
+        sheets = load_all()
+    all_orders = (
+        process_meli(sheets["meli_hoy"], "hoy") +
+        process_meli(sheets["meli_man"], "manana") +
+        process_amazon(sheets["amazon"], sheets["easyship"]) +
+        process_flex(sheets["flex"])
+    )
+except Exception as e:
+    st.error(f"❌ Error al cargar datos: {e}")
     st.stop()
 
-# Aplicar filtros
-current_tab = "hoy" if "Hoy" in tab_sel else "manana"
-filtered = [o for o in all_orders if o["tab"] == current_tab]
-if filtro_canal != "Todos":     filtered = [o for o in filtered if o["canal"]      == filtro_canal]
-if filtro_paq   != "Todas":     filtered = [o for o in filtered if o["paqueteria"] == filtro_paq]
-if filtro_est   == "Activos":   filtered = [o for o in filtered if not is_cancelado(o["estado"])]
-if filtro_est   == "Cancelados":filtered = [o for o in filtered if is_cancelado(o["estado"])]
+# Filtrar por vista y canal
+current_tab = "hoy" if "Hoy" in vista else "manana"
+orders = [o for o in all_orders if o["tab"] == current_tab and o["canal"] in filtro_canal]
 
-# KPIs
-activos    = [o for o in filtered if not is_cancelado(o["estado"])]
-cancels    = [o for o in filtered if is_cancelado(o["estado"])]
-preparados = [o for o in activos if any(k in o["estado"].lower() for k in ["preparado","listo","easy ship"])]
-total_uds  = sum(o["uds"] for o in activos)
+# ── KPIs GLOBALES ─────────────────────────────────────────
+total_ped = len(orders)
+total_uds = sum(o["uds"] for o in orders if o["clasificacion"] != "cancelado")
+n_prep    = sum(1 for o in orders if o["clasificacion"] == "preparado")
+n_pend    = sum(1 for o in orders if o["clasificacion"] == "pendiente")
+n_canc    = sum(1 for o in orders if o["clasificacion"] == "cancelado")
 
 k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("Total pedidos",     len(filtered))
-k2.metric("Unidades a surtir", total_uds)
-k3.metric("Preparados",        len(preparados))
-k4.metric("Pendientes",        len(activos) - len(preparados))
-k5.metric("Cancelados",        len(cancels))
+k1.metric("📦 Total pedidos",    total_ped)
+k2.metric("📊 Uds a surtir",     total_uds)
+k3.metric("✅ Preparados",       n_prep)
+k4.metric("⏳ Pendientes",       n_pend)
+k5.metric("🚫 Cancelados",       n_canc)
+
+pct_prep = round(n_prep / (n_prep + n_pend) * 100) if (n_prep + n_pend) > 0 else 0
+st.progress(pct_prep / 100, text=f"Avance de preparación: **{pct_prep}%** ({n_prep} de {n_prep + n_pend} pedidos activos)")
 
 st.divider()
 
-# Agrupar por corte
-CORTE_ORDER = [c[0] for c in CORTES_MINUTOS] + ["Mañana"]
-by_corte = {c: [] for c in CORTE_ORDER}
-for o in filtered:
-    c = o.get("corte", "Sin corte")
-    if c not in by_corte:
-        by_corte[c] = []
-    by_corte[c].append(o)
+# ── SECCIONES POR CORTE ───────────────────────────────────
+all_corte_labels = [c["label"] for c in CORTES] + ["Sin asignar"]
+acum_prep = 0
+acum_pend = 0
+acum_canc = 0
+acum_uds  = 0
 
-CANAL_EMOJI = {"MeLi": "🟡", "Amazon": "🔵", "FLEX": "🟣"}
-PAQ_LABEL   = {"DHL": "🔴 DHL", "Amazon Logistics": "🔵 AMZ Log.", "FLEX": "🟣 FLEX", "MeLi": "🟡 MeLi"}
-STATUS_MAP  = {"cancel": "🚫", "preparado": "✅", "listo": "✅", "easy ship": "✅", "paquete de": "📦"}
-
-def fmt_estado(e):
-    for k, emoji in STATUS_MAP.items():
-        if k in str(e).lower():
-            return f"{emoji} {e}"
-    return e
-
-# Renderizar por corte
-for corte_label in CORTE_ORDER:
-    ords = by_corte.get(corte_label, [])
-    if not ords:
+for corte_label in all_corte_labels:
+    corte_orders = [o for o in orders if o["corte"] == corte_label]
+    if not corte_orders:
         continue
 
-    status     = corte_status(corte_label)
-    status_txt = {"cerrado": "✔ Cerrado", "proceso": "⏳ En proceso", "proximo": "⏰ Próximo"}.get(status, "")
-    uds_corte  = sum(o["uds"] for o in ords if not is_cancelado(o["estado"]))
-    expanded   = status == "proceso"
+    c_prep = sum(1 for o in corte_orders if o["clasificacion"] == "preparado")
+    c_pend = sum(1 for o in corte_orders if o["clasificacion"] == "pendiente")
+    c_canc = sum(1 for o in corte_orders if o["clasificacion"] == "cancelado")
+    c_uds  = sum(o["uds"] for o in corte_orders if o["clasificacion"] != "cancelado")
 
-    with st.expander(
-        f"🕐 Corte {corte_label}  |  {status_txt}  |  {len(ords)} pedidos · {uds_corte} uds",
-        expanded=expanded
-    ):
+    acum_prep += c_prep
+    acum_pend += c_pend
+    acum_canc += c_canc
+    acum_uds  += c_uds
+
+    if corte_label == "Sin asignar":
+        status_key, status_txt = "proximo", "📋 Sin corte asignado"
+        is_active = False
+    else:
+        status_key, status_txt = corte_status(corte_label)
+        is_active = status_key == "proceso"
+
+    header = (
+        f"🕐 **{corte_label}**  {status_txt}  │  "
+        f"📦 {len(corte_orders)} pedidos · {c_uds} uds  │  "
+        f"✅ {c_prep} preparados  ⏳ {c_pend} pendientes  🚫 {c_canc} cancelados"
+    )
+
+    with st.expander(header, expanded=is_active):
+
+        # ── Resumen por canal ──────────────────────────────
+        canal_groups = {}
+        for o in corte_orders:
+            k = get_canal_key(o)
+            canal_groups.setdefault(k, []).append(o)
+
+        col1, col2, col3, col4 = st.columns(4)
+        for idx, (ckey, cfg) in enumerate(CANAL_CONFIG.items()):
+            with [col1, col2, col3, col4][idx]:
+                c_ords = canal_groups.get(ckey, [])
+                if c_ords:
+                    cp = sum(1 for x in c_ords if x["clasificacion"] == "preparado")
+                    cn = sum(1 for x in c_ords if x["clasificacion"] == "pendiente")
+                    cc = sum(1 for x in c_ords if x["clasificacion"] == "cancelado")
+                    cu = sum(x["uds"] for x in c_ords if x["clasificacion"] != "cancelado")
+                    st.markdown(f"**{cfg['emoji']} {cfg['label']}**")
+                    st.markdown(f"✅ `{cp}` preparados")
+                    st.markdown(f"⏳ `{cn}` pendientes")
+                    st.markdown(f"🚫 `{cc}` cancelados")
+                    st.markdown(f"📦 `{len(c_ords)}` pedidos · `{cu}` uds")
+                else:
+                    st.markdown(f"**{cfg['emoji']} {cfg['label']}**")
+                    st.caption("Sin pedidos")
+
+        # ── Acumulado ──────────────────────────────────────
+        st.info(
+            f"🔢 **Acumulado hasta este corte:**  "
+            f"✅ {acum_prep} preparados · "
+            f"⏳ {acum_pend} pendientes · "
+            f"📦 {acum_uds} uds totales"
+        )
+
+        st.divider()
+
+        # ── Tabla de detalle ───────────────────────────────
         rows = []
-        for o in ords:
+        for o in corte_orders:
+            ckey = get_canal_key(o)
+            cfg  = CANAL_CONFIG.get(ckey, {"emoji": "", "label": o["canal"]})
             rows.append({
+                "Canal":      f"{cfg['emoji']} {cfg['label']}",
                 "# Pedido":   o["id"],
-                "Canal":      CANAL_EMOJI.get(o["canal"], "") + " " + o["canal"],
-                "Paquetería": PAQ_LABEL.get(o["paqueteria"], o["paqueteria"]),
                 "SKU":        o["sku"],
-                "Producto":   o["titulo"][:65] + "..." if len(o["titulo"]) > 65 else o["titulo"],
+                "Producto":   o["titulo"][:60] + "…" if len(o["titulo"]) > 60 else o["titulo"],
                 "Uds":        o["uds"],
-                "Estado":     fmt_estado(o["estado"]),
-                "Fecha/Hora": o["fecha"],
+                "Estado":     f"{CLAS_EMOJI.get(o['clasificacion'],'')} {o['estado']}",
+                "Fecha/Slot": o["fecha"],
             })
             if o["es_paquete"]:
                 for p in o["partidas"]:
+                    p_clas = classify_estado(p["estado"])
                     rows.append({
-                        "# Pedido":   f"   ↳ {p['id']}",
                         "Canal":      "",
-                        "Paquetería": "",
+                        "# Pedido":   f"   ↳ {p['id']}",
                         "SKU":        p["sku"],
-                        "Producto":   p["titulo"][:60] + "..." if len(p["titulo"]) > 60 else p["titulo"],
+                        "Producto":   p["titulo"][:55] + "…" if len(p["titulo"]) > 55 else p["titulo"],
                         "Uds":        p["uds"],
-                        "Estado":     fmt_estado(p["estado"]),
-                        "Fecha/Hora": "",
+                        "Estado":     f"{CLAS_EMOJI.get(p_clas,'')} {p['estado']}",
+                        "Fecha/Slot": "",
                     })
 
-        st.dataframe(
-            pd.DataFrame(rows),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Uds":    st.column_config.NumberColumn(width="small"),
-                "Estado": st.column_config.TextColumn(width="medium"),
-            }
-        )
+        if rows:
+            st.dataframe(
+                pd.DataFrame(rows),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Uds":    st.column_config.NumberColumn(width="small"),
+                    "Estado": st.column_config.TextColumn(width="medium"),
+                    "Canal":  st.column_config.TextColumn(width="medium"),
+                }
+            )
 
 st.caption(
-    f"🏭 Almacén: TLANEPANTLA · "
-    f"Última actualización: {datetime.now().strftime('%H:%M:%S')} · "
-    f"Auto-refresh cada 5 min"
+    f"🔄 Auto-refresh cada 5 min · "
+    f"Última carga: {datetime.now().strftime('%H:%M:%S')}"
 )
